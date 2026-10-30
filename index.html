@@ -1,622 +1,693 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell,
-  LineChart, Line, CartesianGrid
-} from 'recharts';
-import {
-  LayoutDashboard, BarChart2, Table as TableIcon,
-  ShieldCheck, Search, Download, Printer, RefreshCw,
-  AlertCircle, CheckCircle2, Clock, Info, ArrowUpRight
-} from 'lucide-react';
-
-const SOURCE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQHbJAPAqcvVwjwXxYaQ8mPjkmfgcppdqwMs6dpX08D6TNzV8Gn5THjj4lzIUsk4WTc_AC5l-MHZcab/pub?output=csv";
-const COLORS = ["#2563eb", "#0d9488", "#7c3aed", "#d97706", "#db2777", "#475569", "#059669", "#0891b2", "#dc2626", "#9333ea"];
-
-// Custom CSV Parser to replace papaparse
-const parseCSV = (text) => {
-  const rows = [];
-  let currentRow = [];
-  let currentCell = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    const nextChar = text[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && nextChar === '"') {
-        currentCell += '"';
-        i++; // skip next escaped quote
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (char === ',' && !inQuotes) {
-      currentRow.push(currentCell);
-      currentCell = '';
-    } else if ((char === '\n' || char === '\r') && !inQuotes) {
-      if (char === '\r' && nextChar === '\n') i++;
-      currentRow.push(currentCell);
-      rows.push(currentRow);
-      currentRow = [];
-      currentCell = '';
-    } else {
-      currentCell += char;
-    }
-  }
-  
-  if (currentCell || text[text.length - 1] === ',') currentRow.push(currentCell);
-  if (currentRow.length > 0) rows.push(currentRow);
-
-  return rows;
-};
-
-const csvToJson = (csvString) => {
-  const rows = parseCSV(csvString);
-  if (rows.length === 0) return { fields: [], data: [] };
-  
-  const headers = rows[0].map(h => h.trim());
-  const data = [];
-  
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.length === 1 && row[0].trim() === '') continue; // skip completely empty rows
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Analisis Kesihatan Awam</title>
     
-    const obj = {};
-    for (let j = 0; j < headers.length; j++) {
-      obj[headers[j]] = row[j] !== undefined ? row[j] : "";
-    }
-    data.push(obj);
-  }
-  return { fields: headers, data };
-};
+    <!-- Tailwind CSS untuk Styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Chart.js untuk Carta -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- PapaParse untuk membaca CSV -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    
+    <!-- Phosphor Icons untuk Ikon Moden -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
 
-const unparseCSV = (fields, data) => {
-  const escape = (val) => {
-    if (val === null || val === undefined) return '';
-    const str = String(val);
-    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-  const headerRow = fields.map(escape).join(',');
-  const dataRows = data.map(row => fields.map(f => escape(row[f])).join(','));
-  return [headerRow, ...dataRows].join('\n');
-};
+    <style>
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
 
-// Utility Functions
-const parseNumber = (value) => {
-  if (value === null || value === undefined) return null;
-  let text = String(value).trim().replace(/,/g, "").replace(/%$/, "");
-  if (!text) return null;
-  const number = Number(text);
-  return Number.isFinite(number) ? number : null;
-};
-
-const isDateColumn = (column, rows) => {
-  if (/tarikh|date|masa|time|bulan|month|tahun|year/i.test(column)) return true;
-  const values = rows.map(r => r[column]).filter(v => v && String(v).trim());
-  if (values.length < 2) return false;
-  const validDates = values.filter(v => !Number.isNaN(Date.parse(v)));
-  return validDates.length >= Math.max(2, Math.ceil(values.length * 0.65));
-};
-
-export default function Dashboard() {
-  const [allRows, setAllRows] = useState([]);
-  const [columns, setColumns] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [refreshInterval, setRefreshInterval] = useState(2); // minutes
-  const [orgName, setOrgName] = useState("Nama organisasi / fasiliti belum ditetapkan");
-
-  const [filters, setFilters] = useState({
-    search: '',
-    category: '',
-    dateFrom: '',
-    dateTo: ''
-  });
-
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-
-  const fetchData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetch(SOURCE, { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
-      const csv = await response.text();
-      
-      const { fields: parsedColumns, data: rawRows } = csvToJson(csv);
-      
-      if (!parsedColumns || parsedColumns.length === 0) {
-        throw new Error("Tiada nama lajur ditemui dalam sumber CSV atau fail kosong.");
-      }
-
-      const parsedRows = rawRows.filter(row => Object.values(row).some(v => String(v || "").trim() !== ""));
-      
-      const sensitivePattern = /nama pesakit|patient name|no\.?\s*kad pengenalan|ic\s*no|nric|passport|telefon|phone|alamat penuh|full address/i;
-      if (parsedColumns.some(c => sensitivePattern.test(c))) {
-        setError("PAPARAN DIHENTIKAN: Sumber CSV mengandungi maklumat sensitif.");
-        setLoading(false);
-        return;
-      }
-
-      setColumns(parsedColumns);
-      setAllRows(parsedRows);
-      setLastUpdated(new Date());
-      setLoading(false);
-    } catch (err) {
-      setError(err.message);
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  useEffect(() => {
-    let interval;
-    if (autoRefresh) {
-      interval = setInterval(fetchData, refreshInterval * 60000);
-    }
-    return () => clearInterval(interval);
-  }, [autoRefresh, refreshInterval]);
-
-  // Derived Data & Columns
-  const dateColumn = useMemo(() => columns.find(c => isDateColumn(c, allRows.slice(0, 100))) || "", [columns, allRows]);
-  
-  const numericColumns = useMemo(() => columns.filter(c => {
-    const valid = allRows.filter(r => parseNumber(r[c]) !== null).length;
-    return valid >= Math.max(2, Math.ceil(allRows.length * 0.35));
-  }), [columns, allRows]);
-
-  const categoryColumns = useMemo(() => columns.filter(c => {
-    if (c === dateColumn || numericColumns.includes(c)) return false;
-    const values = new Set(allRows.map(r => String(r[c] || "").trim()).filter(Boolean));
-    return values.size > 1 && values.size <= 100;
-  }), [columns, allRows, dateColumn, numericColumns]);
-
-  const primaryCategoryCol = categoryColumns[0] || "";
-  const primaryNumericCol = numericColumns[0] || "";
-
-  // Filtering
-  const filteredRows = useMemo(() => {
-    return allRows.filter(row => {
-      const matchesSearch = !filters.search || columns.some(c => String(row[c] || "").toLowerCase().includes(filters.search.toLowerCase()));
-      const matchesCategory = !filters.category || String(row[primaryCategoryCol] || "").trim() === filters.category;
-      
-      let matchesDate = true;
-      if (dateColumn && (filters.dateFrom || filters.dateTo)) {
-        const d = new Date(row[dateColumn]);
-        if (!Number.isNaN(d.getTime())) {
-          if (filters.dateFrom && d < new Date(filters.dateFrom + "T00:00:00")) matchesDate = false;
-          if (filters.dateTo && d > new Date(filters.dateTo + "T23:59:59")) matchesDate = false;
-        }
-      }
-      return matchesSearch && matchesCategory && matchesDate;
-    });
-  }, [allRows, filters, columns, primaryCategoryCol, dateColumn]);
-
-  useEffect(() => { setCurrentPage(1); }, [filters]); // Reset page on filter change
-
-  // Chart Data Preparation
-  const categoryData = useMemo(() => {
-    if (!primaryCategoryCol) return [];
-    const counts = {};
-    filteredRows.forEach(r => {
-      const val = String(r[primaryCategoryCol] || "").trim() || "(Kosong)";
-      counts[val] = (counts[val] || 0) + 1;
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 10);
-  }, [filteredRows, primaryCategoryCol]);
-
-  const trendData = useMemo(() => {
-    if (!dateColumn || !primaryNumericCol) return [];
-    const sums = {};
-    filteredRows.forEach(r => {
-      const d = new Date(r[dateColumn]);
-      const num = parseNumber(r[primaryNumericCol]);
-      if (Number.isNaN(d.getTime()) || num === null) return;
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      sums[key] = (sums[key] || 0) + num;
-    });
-    return Object.entries(sums)
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .slice(-30)
-      .map(([name, value]) => ({ name, value }));
-  }, [filteredRows, dateColumn, primaryNumericCol]);
-
-  const exportCSV = () => {
-    const csv = unparseCSV(columns, filteredRows);
-    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "dashboard-data.csv";
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handlePrint = () => window.print();
-
-  return (
-    <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      {/* SIDEBAR */}
-      <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-white shadow-xl z-20 print:hidden">
-        <div className="p-6 pb-2">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-400 to-teal-400 flex items-center justify-center font-bold text-2xl">
-              +
+    <!-- SIDEBAR -->
+    <aside class="hidden md:flex w-64 flex-col bg-slate-900 text-white shadow-xl z-20">
+        <div class="p-6 pb-2">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-400 to-teal-400 flex items-center justify-center font-bold text-2xl">
+                    +
+                </div>
+                <div>
+                    <div class="font-bold text-lg leading-tight tracking-tight">Kesihatan<span class="text-teal-400">Awam</span></div>
+                    <div class="text-[10px] text-slate-400 tracking-widest mt-0.5">DATA INTELLIGENCE</div>
+                </div>
             </div>
-            <div>
-              <div className="font-bold text-lg leading-tight tracking-tight">Kesihatan<span className="text-teal-400">Awam</span></div>
-              <div className="text-[10px] text-slate-400 tracking-widest mt-0.5">DATA INTELLIGENCE</div>
-            </div>
-          </div>
         </div>
 
-        <div className="px-6 py-4 text-xs font-bold text-slate-500 tracking-wider">MENU UTAMA</div>
-        <nav className="flex-1 px-4 space-y-1">
-          <a href="#overview" className="flex items-center gap-3 px-3 py-2.5 bg-blue-600/20 text-blue-400 rounded-lg text-sm font-medium transition-colors">
-            <LayoutDashboard size={18} /> Gambaran Keseluruhan
-          </a>
-          <a href="#charts" className="flex items-center gap-3 px-3 py-2.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 rounded-lg text-sm font-medium transition-colors">
-            <BarChart2 size={18} /> Analisis Data
-          </a>
-          <a href="#table" className="flex items-center gap-3 px-3 py-2.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 rounded-lg text-sm font-medium transition-colors">
-            <TableIcon size={18} /> Jadual Rekod
-          </a>
+        <div class="px-6 py-4 text-xs font-bold text-slate-500 tracking-wider">MENU UTAMA</div>
+        <nav class="flex-1 px-4 space-y-1">
+            <a href="#overview" class="flex items-center gap-3 px-3 py-2.5 bg-blue-600/20 text-blue-400 rounded-lg text-sm font-medium transition-colors">
+                <i class="ph ph-squares-four text-lg"></i> Gambaran Keseluruhan
+            </a>
+            <a href="#charts" class="flex items-center gap-3 px-3 py-2.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 rounded-lg text-sm font-medium transition-colors">
+                <i class="ph ph-chart-bar text-lg"></i> Analisis Data
+            </a>
+            <a href="#table" class="flex items-center gap-3 px-3 py-2.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 rounded-lg text-sm font-medium transition-colors">
+                <i class="ph ph-table text-lg"></i> Jadual Rekod
+            </a>
         </nav>
 
-        <div className="p-4 mt-auto">
-          <div className="bg-slate-800/50 p-4 rounded-xl flex items-start gap-3">
-            <ShieldCheck className="text-teal-400 shrink-0" size={24} />
-            <div>
-              <div className="text-sm font-semibold">Keselamatan Data</div>
-              <div className="text-xs text-slate-400 mt-1">Semakan lajur automatik aktif</div>
+        <div class="p-4 mt-auto">
+            <div class="bg-slate-800/50 p-4 rounded-xl flex items-start gap-3">
+                <i class="ph ph-shield-check text-teal-400 text-2xl shrink-0"></i>
+                <div>
+                    <div class="text-sm font-semibold">Keselamatan Data</div>
+                    <div class="text-xs text-slate-400 mt-1">Semakan lajur automatik aktif</div>
+                </div>
             </div>
-          </div>
-          <div className="text-center text-[10px] text-slate-500 tracking-widest mt-6">DASHBOARD • V2.0</div>
+            <div class="text-center text-[10px] text-slate-500 tracking-widest mt-6">DASHBOARD • V2.0</div>
         </div>
-      </aside>
+    </aside>
 
-      {/* MAIN CONTENT */}
-      <main className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto print:h-auto print:overflow-visible relative scroll-smooth">
-        {/* TOPBAR */}
-        <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 print:hidden">
-          <div className="text-sm text-slate-500">
-            Dashboard <span className="mx-2">/</span> <strong className="text-slate-800">Analisis Kesihatan Awam</strong>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className={`px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 ${loading ? 'bg-amber-100 text-amber-700' : error ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
-              <span className="w-2 h-2 rounded-full bg-current animate-pulse"></span>
-              {loading ? 'Memuatkan...' : error ? 'Ralat Sambungan' : 'Dalam Talian'}
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto relative scroll-smooth print:h-auto print:overflow-visible">
+        
+        <!-- TOPBAR -->
+        <header class="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 print:hidden">
+            <div class="text-sm text-slate-500">
+                Dashboard <span class="mx-2">/</span> <strong class="text-slate-800">Analisis Kesihatan Awam</strong>
             </div>
-            <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-sm font-bold">
-              KA
+            <div class="flex items-center gap-4">
+                <div id="statusBadge" class="px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 bg-amber-100 text-amber-700">
+                    <span class="w-2 h-2 rounded-full bg-current animate-pulse"></span>
+                    <span id="statusText">Memuatkan...</span>
+                </div>
+                <div class="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-sm font-bold">
+                    KA
+                </div>
             </div>
-          </div>
         </header>
 
-        <div className="p-6 md:p-8 max-w-7xl mx-auto w-full space-y-6">
-          
-          {/* HEADER SECTION */}
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 print:hidden">
-            <div>
-              <div className="text-blue-600 font-bold text-xs tracking-widest mb-2 flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-teal-500 ring-4 ring-teal-500/20"></span> PEMANTAUAN DATA
-              </div>
-              <h1 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight">Dashboard Analisis Kesihatan Awam</h1>
-              <p className="text-slate-500 text-sm mt-2">Pemantauan Data, Analisis Indikator dan Trend Kesihatan</p>
-              <input 
-                className="mt-3 bg-transparent border-none text-slate-600 text-sm font-medium w-full max-w-md focus:ring-0 p-0"
-                value={orgName}
-                onChange={(e) => setOrgName(e.target.value)}
-                placeholder="Masukkan nama organisasi..."
-              />
-            </div>
-            <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-              <button onClick={handlePrint} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-all shadow-sm">
-                <Printer size={16} /> Cetak
-              </button>
-              <button onClick={fetchData} disabled={loading} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-all shadow-sm disabled:opacity-50">
-                <RefreshCw size={16} className={loading ? "animate-spin" : ""} /> {loading ? 'Memuatkan...' : 'Muat Semula'}
-              </button>
-            </div>
-          </div>
-
-          {/* STATUS STRIP */}
-          <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row justify-between items-center gap-4 shadow-sm print:hidden">
-            <div className="flex items-center gap-3 text-sm font-medium text-slate-700">
-              {error ? (
-                <><AlertCircle className="text-red-500" size={20} /> <span className="text-red-600">{error}</span></>
-              ) : (
-                <><CheckCircle2 className="text-emerald-500" size={20} /> Data berjaya dihubungkan dan disemak.</>
-              )}
-            </div>
-            <div className="flex items-center gap-4 text-xs text-slate-500">
-              <div className="flex items-center gap-1"><Clock size={14} /> Kemas kini: {lastUpdated ? lastUpdated.toLocaleTimeString('ms-MY') : 'Belum tersedia'}</div>
-              <div className="h-4 w-px bg-slate-200"></div>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} className="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
-                Auto-refresh
-              </label>
-              <select value={refreshInterval} onChange={e => setRefreshInterval(Number(e.target.value))} className="text-xs border-slate-200 rounded bg-slate-50 py-1 pl-2 pr-6">
-                <option value={1}>1 min</option>
-                <option value={2}>2 min</option>
-                <option value={5}>5 min</option>
-              </select>
-            </div>
-          </div>
-
-          {/* STATS CARDS */}
-          <div id="overview" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <StatCard 
-              title="Jumlah Rekod" 
-              value={filteredRows.length.toLocaleString('ms-MY')} 
-              subtitle={`Daripada ${allRows.length.toLocaleString('ms-MY')} rekod`} 
-              icon={<TableIcon size={20} />} 
-              color="blue" 
-            />
-            <StatCard 
-              title={numericColumns[0] || "Indikator Utama"} 
-              value={numericColumns[0] ? filteredRows.reduce((acc, r) => acc + (parseNumber(r[numericColumns[0]]) || 0), 0).toLocaleString('ms-MY') : "—"} 
-              subtitle="Jumlah kumulatif nilai sah" 
-              icon={<BarChart2 size={20} />} 
-              color="teal" 
-            />
-            <StatCard 
-              title={numericColumns[1] || "Indikator Kedua"} 
-              value={numericColumns[1] ? filteredRows.reduce((acc, r) => acc + (parseNumber(r[numericColumns[1]]) || 0), 0).toLocaleString('ms-MY') : "—"} 
-              subtitle="Jumlah kumulatif nilai sah" 
-              icon={<ArrowUpRight size={20} />} 
-              color="purple" 
-            />
-            <StatCard 
-              title="Kategori Dikenal Pasti" 
-              value={primaryCategoryCol ? new Set(filteredRows.map(r => String(r[primaryCategoryCol] || "").trim()).filter(Boolean)).size : "—"} 
-              subtitle={`Berdasarkan: ${primaryCategoryCol || 'Tiada'}`} 
-              icon={<LayoutDashboard size={20} />} 
-              color="amber" 
-            />
-          </div>
-
-          {/* FILTERS */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm print:hidden">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">⚙ Penapis Analisis</h3>
-              <button onClick={() => setFilters({ search: '', category: '', dateFrom: '', dateTo: '' })} className="text-xs font-semibold text-blue-600 hover:text-blue-700">Tetapkan Semula</button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input 
-                  type="text" placeholder="Cari dalam semua lajur..." 
-                  className="w-full pl-9 pr-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  value={filters.search} onChange={e => setFilters({...filters, search: e.target.value})}
-                />
-              </div>
-              <div>
-                <select 
-                  className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  value={filters.category} onChange={e => setFilters({...filters, category: e.target.value})}
-                >
-                  <option value="">Semua Kategori</option>
-                  {[...new Set(allRows.map(r => String(r[primaryCategoryCol] || "").trim()).filter(Boolean))].sort().map(cat => (
-                    <option key={cat} value={cat}>{cat}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <input 
-                  type="date" className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  value={filters.dateFrom} onChange={e => setFilters({...filters, dateFrom: e.target.value})}
-                />
-              </div>
-              <div>
-                <input 
-                  type="date" className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  value={filters.dateTo} onChange={e => setFilters({...filters, dateTo: e.target.value})}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* CHARTS */}
-          <div id="charts" className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-              <div className="flex justify-between items-start mb-6">
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Perbandingan Mengikut Kategori</h3>
-                  <p className="text-xs text-slate-500 mt-1">{primaryCategoryCol ? `Bilangan rekod mengikut ${primaryCategoryCol}` : 'Lajur kategori tidak dikenal pasti'}</p>
-                </div>
-                <span className="px-2 py-1 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">BAR</span>
-              </div>
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={categoryData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b' }} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b' }} />
-                    <Tooltip cursor={{ fill: '#f1f5f9' }} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                    <Bar dataKey="value" fill="#2563eb" radius={[4, 4, 0, 0]} maxBarSize={50} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-              <div className="flex justify-between items-start mb-6">
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Komposisi Rekod</h3>
-                  <p className="text-xs text-slate-500 mt-1">{primaryCategoryCol ? `Pecahan kategori: ${primaryCategoryCol}` : 'Kategori tidak tersedia'}</p>
-                </div>
-                <span className="px-2 py-1 bg-teal-100 text-teal-700 text-[10px] font-bold rounded">DONUT</span>
-              </div>
-              <div className="h-64 flex flex-col md:flex-row items-center">
-                <div className="flex-1 w-full h-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={categoryData} cx="50%" cy="50%" innerRadius="60%" outerRadius="80%" paddingAngle={2} dataKey="value">
-                        {categoryData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                      </Pie>
-                      <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="w-full md:w-1/3 flex flex-wrap md:flex-col gap-2 justify-center mt-4 md:mt-0 text-xs">
-                  {categoryData.slice(0, 6).map((item, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[i % COLORS.length] }}></div>
-                      <span className="text-slate-600 truncate" title={item.name}>{item.name}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm lg:col-span-2">
-              <div className="flex justify-between items-start mb-6">
-                <div>
-                  <h3 className="font-bold text-slate-800 text-sm">Trend Mengikut Tarikh</h3>
-                  <p className="text-xs text-slate-500 mt-1">{dateColumn && primaryNumericCol ? `Jumlah ${primaryNumericCol} mengikut ${dateColumn}` : 'Memerlukan lajur tarikh dan numerik yang sesuai'}</p>
-                </div>
-                <span className="px-2 py-1 bg-purple-100 text-purple-700 text-[10px] font-bold rounded">TREND</span>
-              </div>
-              <div className="h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={trendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b' }} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b' }} />
-                    <Tooltip cursor={{ stroke: '#cbd5e1' }} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                    <Line type="monotone" dataKey="value" stroke="#7c3aed" strokeWidth={3} dot={{ r: 4, fill: '#7c3aed', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </div>
-
-          {/* INSIGHTS */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 print:hidden">
-            <InsightCard icon={<Info />} title="Rekod Dianalisis" value={filteredRows.length.toLocaleString('ms-MY')} description={filteredRows.length ? "Jumlah rekod memenuhi penapis semasa." : "Tiada rekod memenuhi penapis."} />
-            {categoryData.length > 0 && (
-              <InsightCard icon={<LayoutDashboard />} title="Kategori Paling Banyak" value={categoryData[0].name} description={`${categoryData[0].value.toLocaleString('ms-MY')} rekod dalam kategori ini.`} />
-            )}
-            <InsightCard icon={<AlertCircle />} title="Nota Interpretasi" value="Semak Definisi" description="Perubahan trend tidak semestinya baik atau buruk. Rujuk sasaran rasmi." />
-          </div>
-
-          {/* DATA TABLE */}
-          <div id="table" className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-            <div className="px-6 py-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="font-bold text-slate-800 text-sm">Jadual Data Terperinci</h3>
-                <p className="text-xs text-slate-500 mt-1">Menunjukkan {filteredRows.length.toLocaleString('ms-MY')} rekod keseluruhan.</p>
-              </div>
-              <button onClick={exportCSV} className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg text-xs font-semibold transition-colors print:hidden">
-                <Download size={14} /> Eksport CSV
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm whitespace-nowrap">
-                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                  <tr>
-                    {columns.map(col => (
-                      <th key={col} className="px-6 py-3 font-semibold text-xs tracking-wider">{col}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-slate-700">
-                  {filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((row, i) => (
-                    <tr key={i} className="hover:bg-slate-50 transition-colors">
-                      {columns.map(col => (
-                        <td key={col} className="px-6 py-3 text-xs max-w-[200px] truncate" title={row[col]}>
-                          {row[col] ? row[col] : <span className="text-slate-400 italic">Kosong</span>}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                  {filteredRows.length === 0 && (
-                    <tr><td colSpan={columns.length || 1} className="px-6 py-8 text-center text-slate-500">Tiada data dijumpai.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+        <div class="p-6 md:p-8 max-w-7xl mx-auto w-full space-y-6">
             
-            {/* PAGINATION */}
-            {filteredRows.length > 0 && (
-              <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500 print:hidden">
+            <!-- HEADER SECTION -->
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 print:hidden">
                 <div>
-                  Memaparkan {(currentPage - 1) * pageSize + 1} - {Math.min(currentPage * pageSize, filteredRows.length)} daripada {filteredRows.length} rekod
+                    <div class="text-blue-600 font-bold text-xs tracking-widest mb-2 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-teal-500 ring-4 ring-teal-500/20"></span> PEMANTAUAN DATA
+                    </div>
+                    <h1 class="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight">Dashboard Analisis Kesihatan Awam</h1>
+                    <p class="text-slate-500 text-sm mt-2">Pemantauan Data, Analisis Indikator dan Trend Kesihatan</p>
+                    <input 
+                        type="text"
+                        id="orgName"
+                        class="mt-3 bg-transparent border-none text-slate-600 text-sm font-medium w-full max-w-md focus:ring-0 p-0 outline-none"
+                        value="Nama organisasi / fasiliti belum ditetapkan"
+                        placeholder="Masukkan nama organisasi..."
+                    />
                 </div>
-                <div className="flex items-center gap-4">
-                  <select className="border-slate-200 rounded bg-white py-1 pl-2 pr-6" value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}>
-                    <option value={10}>10 / halaman</option>
-                    <option value={25}>25 / halaman</option>
-                    <option value={50}>50 / halaman</option>
-                  </select>
-                  <div className="flex gap-1">
-                    <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1 bg-white border border-slate-200 rounded disabled:opacity-50 hover:bg-slate-50">Sebelumnya</button>
-                    <button onClick={() => setCurrentPage(p => Math.min(Math.ceil(filteredRows.length / pageSize), p + 1))} disabled={currentPage >= Math.ceil(filteredRows.length / pageSize)} className="px-3 py-1 bg-white border border-slate-200 rounded disabled:opacity-50 hover:bg-slate-50">Seterusnya</button>
-                  </div>
+                <div class="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                    <button onclick="window.print()" class="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-all shadow-sm">
+                        <i class="ph ph-printer"></i> Cetak
+                    </button>
+                    <button id="refreshBtn" onclick="fetchData()" class="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-all shadow-sm disabled:opacity-50">
+                        <i class="ph ph-arrows-clockwise" id="refreshIcon"></i> <span id="refreshBtnText">Muat Semula</span>
+                    </button>
                 </div>
-              </div>
-            )}
-          </div>
+            </div>
 
-          <footer className="pt-4 pb-8 text-center sm:text-left text-xs text-slate-400 flex flex-col sm:flex-row justify-between border-t border-slate-200">
-            <span><strong>Dashboard Analisis Kesihatan Awam</strong></span>
-            <span>Analisis deskriptif • Semak kerahsiaan sebelum penerbitan</span>
-          </footer>
+            <!-- ERROR MESSAGE (Hidden by default) -->
+            <div id="errorBanner" class="hidden bg-red-50 border border-red-200 rounded-xl p-4 flex gap-3 text-sm text-red-700 font-medium">
+                <i class="ph ph-warning-circle text-xl text-red-500"></i>
+                <span id="errorMessage">Ralat berlaku.</span>
+            </div>
+
+            <!-- STATS CARDS -->
+            <div id="overview" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- Stat 1 -->
+                <div class="relative bg-white rounded-xl p-5 shadow-sm border border-slate-200 overflow-hidden before:absolute before:left-0 before:top-0 before:w-1 before:h-full bg-blue-50 text-blue-600 before:bg-blue-600">
+                    <div class="flex justify-between items-start mb-4">
+                        <span class="text-xs font-bold text-slate-500 uppercase tracking-wider truncate mr-2">Jumlah Rekod</span>
+                        <div class="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-blue-50 text-blue-600">
+                            <i class="ph ph-table text-xl"></i>
+                        </div>
+                    </div>
+                    <div id="statTotal" class="text-3xl font-extrabold text-slate-900 mb-1">-</div>
+                    <div id="statTotalSub" class="text-[10px] text-slate-400 pt-3 border-t border-slate-100">Memuatkan...</div>
+                </div>
+                
+                <!-- Stat 2 -->
+                <div class="relative bg-white rounded-xl p-5 shadow-sm border border-slate-200 overflow-hidden before:absolute before:left-0 before:top-0 before:w-1 before:h-full bg-teal-50 text-teal-600 before:bg-teal-500">
+                    <div class="flex justify-between items-start mb-4">
+                        <span id="statInd1Title" class="text-xs font-bold text-slate-500 uppercase tracking-wider truncate mr-2">Indikator Utama</span>
+                        <div class="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-teal-50 text-teal-600">
+                            <i class="ph ph-chart-line-up text-xl"></i>
+                        </div>
+                    </div>
+                    <div id="statInd1" class="text-3xl font-extrabold text-slate-900 mb-1">-</div>
+                    <div class="text-[10px] text-slate-400 pt-3 border-t border-slate-100">Jumlah kumulatif nilai sah</div>
+                </div>
+
+                <!-- Stat 3 -->
+                <div class="relative bg-white rounded-xl p-5 shadow-sm border border-slate-200 overflow-hidden before:absolute before:left-0 before:top-0 before:w-1 before:h-full bg-purple-50 text-purple-600 before:bg-purple-600">
+                    <div class="flex justify-between items-start mb-4">
+                        <span id="statInd2Title" class="text-xs font-bold text-slate-500 uppercase tracking-wider truncate mr-2">Indikator Kedua</span>
+                        <div class="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-purple-50 text-purple-600">
+                            <i class="ph ph-trend-up text-xl"></i>
+                        </div>
+                    </div>
+                    <div id="statInd2" class="text-3xl font-extrabold text-slate-900 mb-1">-</div>
+                    <div class="text-[10px] text-slate-400 pt-3 border-t border-slate-100">Jumlah kumulatif nilai sah</div>
+                </div>
+
+                <!-- Stat 4 -->
+                <div class="relative bg-white rounded-xl p-5 shadow-sm border border-slate-200 overflow-hidden before:absolute before:left-0 before:top-0 before:w-1 before:h-full bg-amber-50 text-amber-600 before:bg-amber-500">
+                    <div class="flex justify-between items-start mb-4">
+                        <span class="text-xs font-bold text-slate-500 uppercase tracking-wider truncate mr-2">Kategori Unik</span>
+                        <div class="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-amber-50 text-amber-600">
+                            <i class="ph ph-circles-four text-xl"></i>
+                        </div>
+                    </div>
+                    <div id="statCat" class="text-3xl font-extrabold text-slate-900 mb-1">-</div>
+                    <div id="statCatSub" class="text-[10px] text-slate-400 pt-3 border-t border-slate-100">Berdasarkan data</div>
+                </div>
+            </div>
+
+            <!-- FILTERS -->
+            <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm print:hidden">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="font-bold text-slate-800 text-sm flex items-center gap-2">⚙ Penapis Analisis</h3>
+                    <button onclick="resetFilters()" class="text-xs font-semibold text-blue-600 hover:text-blue-700">Tetapkan Semula</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div class="relative">
+                        <i class="ph ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                        <input type="text" id="filterSearch" placeholder="Cari dalam semua lajur..." 
+                            class="w-full pl-9 pr-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" oninput="applyFilters()">
+                    </div>
+                    <div>
+                        <select id="filterCategory" class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" onchange="applyFilters()">
+                            <option value="">Semua Kategori</option>
+                        </select>
+                    </div>
+                    <div>
+                        <input type="date" id="filterDateFrom" class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" onchange="applyFilters()">
+                    </div>
+                    <div>
+                        <input type="date" id="filterDateTo" class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" onchange="applyFilters()">
+                    </div>
+                </div>
+            </div>
+
+            <!-- CHARTS -->
+            <div id="charts" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Bar Chart -->
+                <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+                    <div class="flex justify-between items-start mb-6">
+                        <div>
+                            <h3 class="font-bold text-slate-800 text-sm">Perbandingan Kategori</h3>
+                            <p id="barSub" class="text-xs text-slate-500 mt-1">Bilangan rekod mengikut kategori</p>
+                        </div>
+                        <span class="px-2 py-1 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">BAR</span>
+                    </div>
+                    <div class="h-64 relative">
+                        <canvas id="barChartCanvas"></canvas>
+                    </div>
+                </div>
+
+                <!-- Doughnut Chart -->
+                <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+                    <div class="flex justify-between items-start mb-6">
+                        <div>
+                            <h3 class="font-bold text-slate-800 text-sm">Komposisi Rekod</h3>
+                            <p id="donutSub" class="text-xs text-slate-500 mt-1">Pecahan kategori data</p>
+                        </div>
+                        <span class="px-2 py-1 bg-teal-100 text-teal-700 text-[10px] font-bold rounded">DONUT</span>
+                    </div>
+                    <div class="h-64 relative flex justify-center">
+                        <canvas id="donutChartCanvas"></canvas>
+                    </div>
+                </div>
+
+                <!-- Line Chart (Trend) -->
+                <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm lg:col-span-2">
+                    <div class="flex justify-between items-start mb-6">
+                        <div>
+                            <h3 class="font-bold text-slate-800 text-sm">Trend Mengikut Tarikh</h3>
+                            <p id="trendSub" class="text-xs text-slate-500 mt-1">Trend berdasarkan masa</p>
+                        </div>
+                        <span class="px-2 py-1 bg-purple-100 text-purple-700 text-[10px] font-bold rounded">TREND</span>
+                    </div>
+                    <div class="h-72 relative">
+                        <canvas id="trendChartCanvas"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DATA TABLE -->
+            <div id="table" class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+                <div class="px-6 py-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                        <h3 class="font-bold text-slate-800 text-sm">Jadual Data Terperinci</h3>
+                        <p id="tableInfo" class="text-xs text-slate-500 mt-1">Menunjukkan 0 rekod.</p>
+                    </div>
+                    <button onclick="exportCSV()" class="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg text-xs font-semibold transition-colors print:hidden">
+                        <i class="ph ph-download-simple"></i> Eksport CSV
+                    </button>
+                </div>
+                
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm whitespace-nowrap">
+                        <thead id="tableHead" class="bg-slate-50 text-slate-600 border-b border-slate-200">
+                            <!-- Headers injected by JS -->
+                        </thead>
+                        <tbody id="tableBody" class="divide-y divide-slate-100 text-slate-700">
+                            <!-- Data injected by JS -->
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- PAGINATION -->
+                <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500 print:hidden">
+                    <div id="paginationInfo">Memaparkan 0 - 0 daripada 0 rekod</div>
+                    <div class="flex items-center gap-4">
+                        <select id="pageSize" class="border-slate-200 rounded bg-white py-1 pl-2 pr-6 outline-none" onchange="changePageSize()">
+                            <option value="10">10 / halaman</option>
+                            <option value="25">25 / halaman</option>
+                            <option value="50">50 / halaman</option>
+                        </select>
+                        <div class="flex gap-1">
+                            <button id="btnPrev" onclick="changePage(-1)" class="px-3 py-1 bg-white border border-slate-200 rounded disabled:opacity-50 hover:bg-slate-50">Sebelumnya</button>
+                            <span id="pageCurrent" class="px-3 py-1 bg-white border border-slate-200 rounded font-bold">1</span>
+                            <button id="btnNext" onclick="changePage(1)" class="px-3 py-1 bg-white border border-slate-200 rounded disabled:opacity-50 hover:bg-slate-50">Seterusnya</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- FOOTER -->
+            <footer class="pt-4 pb-8 text-center sm:text-left text-xs text-slate-400 flex flex-col sm:flex-row justify-between border-t border-slate-200">
+                <span><strong>Dashboard Analisis Kesihatan Awam</strong></span>
+                <span>Analisis deskriptif • Semak kerahsiaan sebelum penerbitan</span>
+            </footer>
 
         </div>
-      </main>
-    </div>
-  );
-}
+    </main>
 
-// Sub-components
-function StatCard({ title, value, subtitle, icon, color }) {
-  const colorClasses = {
-    blue: "bg-blue-50 text-blue-600 before:bg-blue-600",
-    teal: "bg-teal-50 text-teal-600 before:bg-teal-500",
-    purple: "bg-purple-50 text-purple-600 before:bg-purple-600",
-    amber: "bg-amber-50 text-amber-600 before:bg-amber-500"
-  };
+    <script>
+        /* ==========================================
+           KONFIGURASI DATA SPREADSHEET
+        ========================================== */
+        const SOURCE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQHbJAPAqcvVwjwXxYaQ8mPjkmfgcppdqwMs6dpX08D6TNzV8Gn5THjj4lzIUsk4WTc_AC5l-MHZcab/pub?output=csv";
+        const CHART_COLORS = ["#2563eb", "#0d9488", "#7c3aed", "#d97706", "#db2777", "#475569", "#059669", "#0891b2", "#dc2626", "#9333ea"];
 
-  return (
-    <div className={`relative bg-white rounded-xl p-5 shadow-sm border border-slate-200 overflow-hidden before:absolute before:left-0 before:top-0 before:w-1 before:h-full ${colorClasses[color]}`}>
-      <div className="flex justify-between items-start mb-4">
-        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider truncate mr-2">{title}</span>
-        <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${colorClasses[color].split(' before')[0]}`}>
-          {icon}
-        </div>
-      </div>
-      <div className="text-3xl font-extrabold text-slate-900 mb-1">{value}</div>
-      <div className="text-[10px] text-slate-400 pt-3 border-t border-slate-100">{subtitle}</div>
-    </div>
-  );
-}
+        /* STATE VARIABLES */
+        let allRows = [];
+        let filteredRows = [];
+        let columns = [];
+        let currentPage = 1;
+        let pageSize = 10;
 
-function InsightCard({ icon, title, value, description }) {
-  return (
-    <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex gap-4 items-start">
-      <div className="w-10 h-10 shrink-0 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center">
-        {React.cloneElement(icon, { size: 20 })}
-      </div>
-      <div>
-        <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">{title}</div>
-        <div className="text-sm font-extrabold text-slate-900 mb-1">{value}</div>
-        <p className="text-[10px] text-slate-500 leading-relaxed">{description}</p>
-      </div>
-    </div>
-  );
-}
+        let primaryCategoryCol = "";
+        let numericColumns = [];
+        let dateColumn = "";
+
+        let charts = {
+            bar: null,
+            donut: null,
+            trend: null
+        };
+
+        // Utility: Number formatter
+        const formatNumber = (num) => new Intl.NumberFormat("ms-MY").format(num || 0);
+
+        const parseNumberSafe = (value) => {
+            if (value === null || value === undefined) return null;
+            let text = String(value).trim().replace(/,/g, "").replace(/%$/, "");
+            if (!text) return null;
+            const number = Number(text);
+            return Number.isFinite(number) ? number : null;
+        };
+
+        // Utility: Identify Column Types
+        function analyzeColumns() {
+            // Find Date Column
+            dateColumn = columns.find(c => {
+                if (/tarikh|date|masa|time|bulan|month|tahun|year/i.test(c)) return true;
+                const vals = allRows.slice(0, 100).map(r => r[c]).filter(v => v);
+                if (vals.length < 2) return false;
+                const valid = vals.filter(v => !Number.isNaN(Date.parse(v)));
+                return valid.length >= Math.max(2, Math.ceil(vals.length * 0.65));
+            }) || "";
+
+            // Find Numeric Columns
+            numericColumns = columns.filter(c => {
+                const valid = allRows.filter(r => parseNumberSafe(r[c]) !== null).length;
+                return valid >= Math.max(2, Math.ceil(allRows.length * 0.35));
+            });
+
+            // Find Category Column
+            const potentialCats = columns.filter(c => {
+                if (c === dateColumn || numericColumns.includes(c)) return false;
+                const uniqueVals = new Set(allRows.map(r => String(r[c] || "").trim()).filter(Boolean));
+                return uniqueVals.size > 1 && uniqueVals.size <= 100;
+            });
+            primaryCategoryCol = potentialCats[0] || "";
+        }
+
+        /* ==========================================
+           FETCH DATA
+        ========================================== */
+        async function fetchData() {
+            setLoadingState(true);
+            try {
+                const response = await fetch(SOURCE, { cache: "no-store" });
+                if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+                const csvText = await response.text();
+
+                Papa.parse(csvText, {
+                    header: true,
+                    skipEmptyLines: 'greedy',
+                    complete: function(results) {
+                        if (results.errors.length > 0 && results.data.length === 0) {
+                            showError("Gagal membaca CSV: " + results.errors[0].message);
+                            return;
+                        }
+
+                        columns = results.meta.fields.map(f => f.trim());
+                        allRows = results.data.filter(row => Object.values(row).some(v => String(v || "").trim() !== ""));
+
+                        // Privacy Check
+                        const sensitivePattern = /nama pesakit|patient name|no\.?\s*kad pengenalan|ic\s*no|nric|passport|telefon|phone|alamat penuh|full address/i;
+                        if (columns.some(c => sensitivePattern.test(c))) {
+                            showError("PAPARAN DIHENTIKAN: Sumber CSV mengandungi maklumat peribadi yang sensitif. Sila guna data agregat sahaja.");
+                            return;
+                        }
+
+                        analyzeColumns();
+                        setupFilters();
+                        applyFilters(); // This will also trigger rendering
+                        setLoadingState(false);
+                    },
+                    error: function(err) {
+                        showError(err.message);
+                    }
+                });
+            } catch (err) {
+                showError("Gagal menghubungi Google Sheets. " + err.message);
+            }
+        }
+
+        /* ==========================================
+           UI UPDATES
+        ========================================== */
+        function setLoadingState(isLoading) {
+            const btnIcon = document.getElementById("refreshIcon");
+            const btnText = document.getElementById("refreshBtnText");
+            const badge = document.getElementById("statusBadge");
+            const badgeText = document.getElementById("statusText");
+
+            if (isLoading) {
+                btnIcon.classList.add("animate-spin");
+                btnText.textContent = "Memuatkan...";
+                badge.className = "px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 bg-amber-100 text-amber-700";
+                badgeText.textContent = "Sedang menyegerak...";
+                document.getElementById("errorBanner").classList.add("hidden");
+            } else {
+                btnIcon.classList.remove("animate-spin");
+                btnText.textContent = "Muat Semula";
+                badge.className = "px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 bg-emerald-100 text-emerald-700";
+                badgeText.textContent = "Dalam Talian";
+            }
+        }
+
+        function showError(msg) {
+            setLoadingState(false);
+            const badge = document.getElementById("statusBadge");
+            const badgeText = document.getElementById("statusText");
+            badge.className = "px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 bg-red-100 text-red-700";
+            badgeText.textContent = "Ralat Sambungan";
+
+            const banner = document.getElementById("errorBanner");
+            banner.classList.remove("hidden");
+            document.getElementById("errorMessage").textContent = msg;
+        }
+
+        /* ==========================================
+           FILTERING
+        ========================================== */
+        function setupFilters() {
+            const catSelect = document.getElementById("filterCategory");
+            catSelect.innerHTML = '<option value="">Semua Kategori</option>';
+            
+            if (primaryCategoryCol) {
+                const uniqueCats = [...new Set(allRows.map(r => String(r[primaryCategoryCol] || "").trim()).filter(Boolean))].sort();
+                uniqueCats.forEach(cat => {
+                    const opt = document.createElement("option");
+                    opt.value = cat;
+                    opt.textContent = cat;
+                    catSelect.appendChild(opt);
+                });
+            }
+        }
+
+        function applyFilters() {
+            const search = document.getElementById("filterSearch").value.toLowerCase();
+            const category = document.getElementById("filterCategory").value;
+            const dateFrom = document.getElementById("filterDateFrom").value;
+            const dateTo = document.getElementById("filterDateTo").value;
+
+            filteredRows = allRows.filter(row => {
+                const matchSearch = !search || columns.some(c => String(row[c] || "").toLowerCase().includes(search));
+                const matchCategory = !category || String(row[primaryCategoryCol] || "").trim() === category;
+                
+                let matchDate = true;
+                if (dateColumn && (dateFrom || dateTo)) {
+                    const d = new Date(row[dateColumn]);
+                    if (!Number.isNaN(d.getTime())) {
+                        if (dateFrom && d < new Date(dateFrom + "T00:00:00")) matchDate = false;
+                        if (dateTo && d > new Date(dateTo + "T23:59:59")) matchDate = false;
+                    }
+                }
+                return matchSearch && matchCategory && matchDate;
+            });
+
+            currentPage = 1;
+            renderDashboard();
+        }
+
+        function resetFilters() {
+            document.getElementById("filterSearch").value = "";
+            document.getElementById("filterCategory").value = "";
+            document.getElementById("filterDateFrom").value = "";
+            document.getElementById("filterDateTo").value = "";
+            applyFilters();
+        }
+
+        /* ==========================================
+           RENDER DASHBOARD
+        ========================================== */
+        function renderDashboard() {
+            updateStats();
+            updateTable();
+            renderCharts();
+        }
+
+        function updateStats() {
+            document.getElementById("statTotal").textContent = formatNumber(filteredRows.length);
+            document.getElementById("statTotalSub").textContent = `Daripada ${formatNumber(allRows.length)} rekod keseluruhan`;
+
+            if (numericColumns[0]) {
+                document.getElementById("statInd1Title").textContent = numericColumns[0];
+                const sum1 = filteredRows.reduce((acc, r) => acc + (parseNumberSafe(r[numericColumns[0]]) || 0), 0);
+                document.getElementById("statInd1").textContent = formatNumber(sum1);
+            }
+
+            if (numericColumns[1]) {
+                document.getElementById("statInd2Title").textContent = numericColumns[1];
+                const sum2 = filteredRows.reduce((acc, r) => acc + (parseNumberSafe(r[numericColumns[1]]) || 0), 0);
+                document.getElementById("statInd2").textContent = formatNumber(sum2);
+            }
+
+            if (primaryCategoryCol) {
+                const uniqueCatCount = new Set(filteredRows.map(r => String(r[primaryCategoryCol] || "").trim()).filter(Boolean)).size;
+                document.getElementById("statCat").textContent = formatNumber(uniqueCatCount);
+                document.getElementById("statCatSub").textContent = `Berdasarkan: ${primaryCategoryCol}`;
+            }
+        }
+
+        /* ==========================================
+           PAGINATION & TABLE
+        ========================================== */
+        function updateTable() {
+            const thead = document.getElementById("tableHead");
+            const tbody = document.getElementById("tableBody");
+            
+            // Headers
+            thead.innerHTML = `<tr>${columns.map(c => `<th class="px-6 py-3 font-semibold text-xs tracking-wider">${c}</th>`).join('')}</tr>`;
+
+            // Data
+            const start = (currentPage - 1) * pageSize;
+            const end = start + pageSize;
+            const pageData = filteredRows.slice(start, end);
+
+            if (pageData.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="${columns.length || 1}" class="px-6 py-8 text-center text-slate-500">Tiada data dijumpai.</td></tr>`;
+            } else {
+                tbody.innerHTML = pageData.map(row => 
+                    `<tr class="hover:bg-slate-50 transition-colors">
+                        ${columns.map(c => `<td class="px-6 py-3 text-xs max-w-[200px] truncate" title="${row[c] || ''}">${row[c] ? row[c] : '<span class="text-slate-400 italic">Kosong</span>'}</td>`).join('')}
+                    </tr>`
+                ).join('');
+            }
+
+            // Pagination UI
+            const totalPages = Math.ceil(filteredRows.length / pageSize) || 1;
+            document.getElementById("tableInfo").textContent = `Menunjukkan ${formatNumber(filteredRows.length)} rekod.`;
+            document.getElementById("paginationInfo").textContent = `Memaparkan ${filteredRows.length ? start + 1 : 0} - ${Math.min(end, filteredRows.length)} daripada ${filteredRows.length} rekod`;
+            document.getElementById("pageCurrent").textContent = currentPage;
+            document.getElementById("btnPrev").disabled = currentPage === 1;
+            document.getElementById("btnNext").disabled = currentPage >= totalPages;
+        }
+
+        function changePage(direction) {
+            const totalPages = Math.ceil(filteredRows.length / pageSize);
+            currentPage += direction;
+            if (currentPage < 1) currentPage = 1;
+            if (currentPage > totalPages) currentPage = totalPages;
+            updateTable();
+        }
+
+        function changePageSize() {
+            pageSize = parseInt(document.getElementById("pageSize").value);
+            currentPage = 1;
+            updateTable();
+        }
+
+        function exportCSV() {
+            if(filteredRows.length === 0) return alert("Tiada data untuk dieksport.");
+            const csv = Papa.unparse(filteredRows);
+            const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = "dashboard_data.csv";
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        /* ==========================================
+           CHART.JS IMPLEMENTATION
+        ========================================== */
+        function renderCharts() {
+            // Prepare Data for Category Charts
+            let catDataMap = {};
+            if (primaryCategoryCol) {
+                filteredRows.forEach(r => {
+                    let val = String(r[primaryCategoryCol] || "").trim() || "(Kosong)";
+                    catDataMap[val] = (catDataMap[val] || 0) + 1;
+                });
+            }
+            const sortedCatData = Object.entries(catDataMap).sort((a, b) => b[1] - a[1]).slice(0, 10);
+            const catLabels = sortedCatData.map(d => d[0]);
+            const catValues = sortedCatData.map(d => d[1]);
+
+            // Update Titles
+            document.getElementById("barSub").textContent = primaryCategoryCol ? `Bilangan rekod mengikut ${primaryCategoryCol}` : 'Tiada lajur kategori';
+            document.getElementById("donutSub").textContent = primaryCategoryCol ? `Pecahan data: ${primaryCategoryCol}` : 'Tiada lajur kategori';
+
+            // 1. BAR CHART
+            if (charts.bar) charts.bar.destroy();
+            charts.bar = new Chart(document.getElementById('barChartCanvas'), {
+                type: 'bar',
+                data: {
+                    labels: catLabels,
+                    datasets: [{
+                        label: 'Bilangan Rekod',
+                        data: catValues,
+                        backgroundColor: '#2563eb',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { font: {size: 10} } },
+                        y: { border: { dash: [4, 4] }, grid: { color: '#e2e8f0' } }
+                    }
+                }
+            });
+
+            // 2. DONUT CHART
+            if (charts.donut) charts.donut.destroy();
+            charts.donut = new Chart(document.getElementById('donutChartCanvas'), {
+                type: 'doughnut',
+                data: {
+                    labels: catLabels,
+                    datasets: [{
+                        data: catValues,
+                        backgroundColor: CHART_COLORS,
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '70%',
+                    plugins: { 
+                        legend: { position: 'right', labels: { boxWidth: 10, font: {size: 10} } }
+                    }
+                }
+            });
+
+            // Prepare Data for Trend Chart
+            let trendDataMap = {};
+            if (dateColumn && numericColumns[0]) {
+                filteredRows.forEach(r => {
+                    let d = new Date(r[dateColumn]);
+                    let num = parseNumberSafe(r[numericColumns[0]]);
+                    if (!Number.isNaN(d.getTime()) && num !== null) {
+                        let key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                        trendDataMap[key] = (trendDataMap[key] || 0) + num;
+                    }
+                });
+            }
+            const sortedTrendData = Object.entries(trendDataMap).sort((a,b) => a[0].localeCompare(b[0])).slice(-30);
+            const trendLabels = sortedTrendData.map(d => d[0]);
+            const trendValues = sortedTrendData.map(d => d[1]);
+
+            document.getElementById("trendSub").textContent = (dateColumn && numericColumns[0]) ? `Jumlah ${numericColumns[0]} mengikut ${dateColumn}` : 'Memerlukan lajur tarikh & numerik';
+
+            // 3. TREND CHART
+            if (charts.trend) charts.trend.destroy();
+            charts.trend = new Chart(document.getElementById('trendChartCanvas'), {
+                type: 'line',
+                data: {
+                    labels: trendLabels,
+                    datasets: [{
+                        label: numericColumns[0] || 'Trend',
+                        data: trendValues,
+                        borderColor: '#7c3aed',
+                        backgroundColor: 'rgba(124, 58, 237, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { font: {size: 10} } },
+                        y: { border: { dash: [4, 4] }, grid: { color: '#e2e8f0' } }
+                    }
+                }
+            });
+        }
+
+        // Initialize on load
+        window.addEventListener('DOMContentLoaded', fetchData);
+    </script>
+</body>
+</html>
